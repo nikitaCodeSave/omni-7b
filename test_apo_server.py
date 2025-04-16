@@ -1,3 +1,14 @@
+"""
+Модуль FastAPI для сервиса автоматической транскрипции аудио с помощью модели Qwen2.5-Omni-7B.
+
+Основные возможности:
+- Загрузка и инициализация модели и процессора Qwen2.5-Omni
+- Обработка аудиофайлов с разбиением на чанки и последующей транскрипцией
+- REST API для получения транскрипции аудио
+- Очистка GPU-памяти и управление ресурсами
+
+Автор: (указать автора при необходимости)
+"""
 import logging
 import os
 import time
@@ -26,7 +37,17 @@ from inference import inference
 # --- Utils for local models ---
 
 def load_qwen25_omni_model(cache_dir, model_name, **kwargs):
-    """Load Qwen2.5-Omni model and processor."""
+    """
+    Загрузка модели и процессора Qwen2.5-Omni из локального кэша или репозитория.
+    
+    Параметры:
+        cache_dir (str): Путь к директории с кэшем моделей.
+        model_name (str): Имя или путь к модели.
+        **kwargs: Дополнительные параметры для from_pretrained.
+    
+    Возвращает:
+        model, processor: Загруженные объекты модели и процессора.
+    """
     model = Qwen2_5OmniModel.from_pretrained(
         model_name,
         cache_dir=cache_dir,
@@ -39,10 +60,12 @@ def load_qwen25_omni_model(cache_dir, model_name, **kwargs):
         cache_dir=cache_dir
     )
     return model, processor
-# --- Check if local model is available ---
+
 # --- Configuration ---
 class Settings(BaseModel):
-    
+    """
+    Конфигурация сервиса транскрипции.
+    """
     model_id: str = "Qwen/Qwen2.5-Omni-7B"
     cache_dir: str = "./models"
     chunk_duration: int = 30
@@ -63,16 +86,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("stt_api")
 logging.getLogger("transformers").setLevel(logging.ERROR)
-# logging.getLogger().addFilter("System prompt modified, audio output may not work as expected")
 logging.getLogger("root").setLevel(logging.ERROR)
 
 # --- FastAPI app ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Контекст жизненного цикла приложения FastAPI.
+    Загружает модель при старте и очищает ресурсы при завершении.
+    """
     logger.info("Loading Qwen2.5-Omni model and processor...")
     clear_gpu_memory()
     try:
-        # settings.cache_dir should point to "models"
         model, processor = load_qwen25_omni_model(cache_dir=settings.cache_dir, model_name=settings.model_id, attn_implementation="flash_attention_2")
         app.state.model = model
         app.state.processor = processor
@@ -106,6 +131,9 @@ app.add_middleware(
 
 # --- Utilities ---
 def clear_gpu_memory():
+    """
+    Очистка памяти GPU и сборка мусора для предотвращения утечек памяти.
+    """
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -119,6 +147,19 @@ def prepare_audio_chunks(
     overlap_seconds: int, 
     temp_dir: str
 ):
+    """
+    Разбивает аудиоданные на чанки заданной длины с перекрытием.
+    
+    Параметры:
+        audio_data (np.ndarray): Массив аудиосэмплов.
+        sr (int): Частота дискретизации.
+        chunk_duration (int): Длительность чанка в секундах.
+        overlap_seconds (int): Перекрытие между чанками в секундах.
+        temp_dir (str): Временная директория для сохранения чанков.
+    
+    Возвращает:
+        List[str]: Пути к сохранённым аудиочанкам.
+    """
     chunk_samples = int(chunk_duration * sr)
     overlap_samples = int(overlap_seconds * sr)
     step_samples = chunk_samples - overlap_samples
@@ -144,6 +185,22 @@ def process_audio_in_chunks(
     overlap_seconds: int,
     batch_size: int
 ) -> str:
+    """
+    Обрабатывает аудиофайл по чанкам и выполняет транскрипцию каждого чанка.
+    
+    Параметры:
+        audio_path (str): Путь к аудиофайлу.
+        model: Загруженная модель Qwen2.5-Omni.
+        processor: Процессор для модели.
+        prompt (str): Промпт для транскрипции.
+        sys_prompt (str): Системный промпт.
+        chunk_duration (int): Длительность чанка.
+        overlap_seconds (int): Перекрытие между чанками.
+        batch_size (int): Размер батча (не используется явно).
+    
+    Возвращает:
+        str: Итоговая склеенная транскрипция.
+    """
     try:
         audio_data, sr = librosa.load(audio_path, sr=None, mono=True)
     except Exception as e:
@@ -175,6 +232,9 @@ def process_audio_in_chunks(
 
 # --- Pydantic models ---
 class TranscriptionResponse(BaseModel):
+    """
+    Модель ответа API с результатом транскрипции и временем обработки.
+    """
     transcription: str
     processing_time_seconds: float
 
@@ -193,7 +253,9 @@ async def transcribe_audio(
     overlap_seconds: int = Form(settings.overlap_seconds, description="Chunk overlap (seconds)"),
     batch_size: int = Form(settings.batch_size, description="Batch size"),
 ):
-    """Transcribe uploaded audio using Qwen/Qwen2.5-Omni-7B."""
+    """
+    Эндпоинт для транскрипции аудиофайла. Принимает файл, параметры обработки и возвращает текстовую транскрипцию.
+    """
     start_time = time.time()
     model = request.app.state.model
     processor = request.app.state.processor
@@ -237,8 +299,12 @@ async def transcribe_audio(
 
 @app.get("/", summary="Service health check")
 async def root():
+    """
+    Эндпоинт для проверки работоспособности сервиса.
+    """
     return {"message": "Qwen Omni STT API is running."}
 
 if __name__ == "__main__":
+    # Точка входа для локального запуска сервиса
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
